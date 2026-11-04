@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Cadastro de produtos impressos em 3D com SKU, filamentos, foto e custos.">
+<title>Produtos · Calculadora de Custo 3D</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<div class="wrap">
+  <nav class="nav" aria-label="Páginas">
+    <a href="./">Calculadora</a>
+    <a href="produtos.html" aria-current="page">Produtos <span class="nav-count" id="nav-count" hidden></span></a>
+  </nav>
+
+  <header class="top">
+    <div>
+      <p class="eyebrow">Catálogo</p>
+      <h1>Produtos</h1>
+      <p class="lede">Peças salvas pela calculadora, com SKU, descrição, filamentos, foto e custos. Os dados ficam neste navegador; exporte um backup para levar a outro computador.</p>
+    </div>
+    <div class="actions">
+      <button class="ghost" id="import-btn" type="button">Importar backup</button>
+      <button class="ghost" id="export-btn" type="button">Exportar backup</button>
+      <a class="primary" href="./?novo=1">Novo produto</a>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+    </div>
+  </header>
+
+  <div class="toolbar" id="toolbar" hidden>
+    <label class="input"><span class="u">Buscar</span><input id="q" type="search" placeholder="SKU, nome ou filamento" autocomplete="off"></label>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="empty-state" id="empty" hidden>
+    <h2>Nenhum produto salvo ainda</h2>
+    <p>Calcule o custo de uma peça e clique em <b>Salvar produto</b>. Ela aparece aqui para você completar SKU, descrição, filamentos e foto.</p>
+    <a class="primary" href="./?novo=1">Calcular primeira peça</a>
+  </div>
+</div>
+
+<dialog class="sheet" id="sheet" aria-labelledby="sheet-title">
+  <form id="form" novalidate>
+    <div class="sheet-head">
+      <h2 id="sheet-title">Ficha do produto</h2>
+      <button class="icon-btn" type="button" id="close" aria-label="Fechar">×</button>
+    </div>
+
+    <div class="sheet-body">
+      <div class="group">
+        <p class="group-title">Foto</p>
+        <div class="drop empty" id="drop" tabindex="0" role="button" aria-label="Adicionar foto do produto"></div>
+        <div class="photo-actions" id="photo-actions" hidden>
+          <button class="ghost" type="button" id="photo-change">Trocar foto</button>
+          <button class="ghost danger" type="button" id="photo-remove">Remover foto</button>
+        </div>
+        <input type="file" id="photo-file" accept="image/*" hidden>
+        <p class="err" id="photo-err" hidden></p>
+      </div>
+
+      <div class="group">
+        <div class="fields">
+          <label class="field"><span>SKU</span><span class="input"><input id="f-sku" autocomplete="off" required></span></label>
+          <label class="field" style="grid-column: span 2"><span>Nome da peça</span><span class="input"><input id="f-nome" autocomplete="off" style="font-family:var(--f-body)" required></span></label>
+        </div>
+        <p class="err" id="form-err" hidden></p>
+        <label class="field"><span>Descrição</span><textarea class="ta" id="f-desc" placeholder="Medidas, uso, variações de cor, observações de acabamento…"></textarea></label>
+      </div>
+
+      <div class="group">
+        <p class="group-title">Filamentos <span id="fil-total"></span></p>
+        <div class="fil-list" id="fil-list"></div>
+        <button class="ghost add-btn" type="button" id="fil-add">+ Adicionar filamento</button>
+      </div>
+
+      <div class="group">
+        <p class="group-title">Custos <span id="calc-date"></span></p>
+        <div class="costs" id="costs"></div>
+        <a class="ghost" id="recalc" href="./" style="text-align:center;text-decoration:none">Recalcular na calculadora</a>
+      </div>
+    </div>
+
+    <div class="sheet-foot">
+      <button class="ghost danger" type="button" id="delete">Excluir</button>
+      <span class="spacer"></span>
+      <button class="ghost" type="button" id="cancel">Cancelar</button>
+      <button class="primary" type="submit">Salvar</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="store.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+const money = v => (v == null || !isFinite(v) ? '—' : brl.format(v));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const hexOk = h => (/^#[0-9a-f]{6}$/i.test(h || '') ? h : '#3a3a3a');
+const tempo = h => { const hh = Math.floor(h || 0), mm = Math.round(((h || 0) - hh) * 60); return `${hh}h${String(mm).padStart(2, '0')}`; };
+const MATERIAIS = ['PLA', 'PLA Silk', 'PLA Matte', 'PLA-CF', 'PETG', 'ABS', 'ASA', 'TPU', 'Nylon', 'Outro'];
+
+let list = [];
+let current = null;   // cópia do produto aberto na ficha
+let foto = null;
+
+async function load() {
+  list = (await Produtos.all()).sort((a, b) => (b.atualizadoEm || '').localeCompare(a.atualizadoEm || ''));
+  const c = $('nav-count');
+  c.textContent = list.length;
+  c.hidden = !list.length;
+  render();
+}
+
+function render() {
+  const q = $('q').value.trim().toLowerCase();
+  const shown = list.filter(p => !q || [p.sku, p.nome, p.descricao, ...(p.filamentos || []).map(f => `${f.material} ${f.cor}`)]
+    .join(' ').toLowerCase().includes(q));
+  $('empty').hidden = list.length > 0;
+  $('toolbar').hidden = list.length === 0;
+  $('count').textContent = q ? `${shown.length} de ${list.length}` : `${list.length} ${list.length === 1 ? 'produto' : 'produtos'}`;
+  $('cards').innerHTML = shown.map(p => {
+    const r = p.resultado || {};
+    const ini = esc((p.nome || '?').trim().slice(0, 2).toUpperCase());
+    return `<button class="card" type="button" data-id="${esc(p.id)}">
+      <div class="thumb${p.foto ? '' : ' empty'}">${p.foto ? `<img src="${esc(p.foto)}" alt="" loading="lazy">` : ini}</div>
+      <div class="card-body">
+        <span class="sku">${esc(p.sku)}</span>
+        <h3 class="card-name">${esc(p.nome)}</h3>
+        <div class="swatches">${(p.filamentos || []).map(f => `<span class="sw" style="background:${hexOk(f.hex)}" title="${esc(`${f.material} ${f.cor}`.trim())}"></span>`).join('')}</div>
+        <div class="card-nums">
+          <div>Custo de produção<b>${money(r.prod)}</b></div>
+          <div>Preço sugerido<b>${money(r.preco)}</b></div>
+        </div>
+      </div>
+    </button>`;
+  }).join('');
+}
+
+// Ficha do produto
+function filRow(f = {}) {
+  const row = document.createElement('div');
+  row.className = 'fil-row';
+  row.innerHTML = `
+    <input type="color" value="${hexOk(f.hex)}" aria-label="Cor do filamento">
+    <select class="sel" aria-label="Material">${MATERIAIS.map(m => `<option${m === f.material ? ' selected' : ''}>${m}</option>`).join('')}</select>
+    <span class="input fil-cor"><input type="text" value="${esc(f.cor)}" placeholder="Cor / marca" aria-label="Cor ou marca"></span>
+    <span class="input"><input inputmode="decimal" value="${f.gramas ? String(f.gramas).replace('.', ',') : ''}" aria-label="Gramas"><span class="u">g</span></span>
+    <button class="icon-btn" type="button" aria-label="Remover filamento">×</button>`;
+  row.querySelector('.icon-btn').addEventListener('click', () => { row.remove(); filTotal(); });
+  return row;
+}
+const num = s => { const n = parseFloat(String(s).replace(/\./g, '').replace(',', '.')); return isFinite(n) && n > 0 ? n : 0; };
+function readFil() {
+  return [...document.querySelectorAll('.fil-row')].map(r => {
+    const [hex, cor, g] = r.querySelectorAll('input');
+    return { hex: hex.value, material: r.querySelector('select').value, cor: cor.value.trim(), gramas: num(g.value) };
+  });
+}
+function filTotal() {
+  const total = readFil().reduce((s, f) => s + f.gramas, 0);
+  const r = current?.resultado;
+  const porPeca = r && r.pecas ? r.peso / r.pecas : 0;
+  $('fil-total').textContent = total || porPeca
+    ? `${total.toLocaleString('pt-BR')} g${porPeca ? ` de ${porPeca.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} g por peça` : ''}`
+    : '';
+}
+
+function showPhoto() {
+  const d = $('drop');
+  d.classList.toggle('empty', !foto);
+  d.innerHTML = foto ? `<img src="${esc(foto)}" alt="Foto do produto">` : '<span><b>Adicionar foto</b>Clique, arraste ou cole uma imagem</span>';
+  $('photo-actions').hidden = !foto;
+}
+async function setPhoto(file) {
+  const err = $('photo-err');
+  err.hidden = true;
+  if (!file || !file.type.startsWith('image/')) { err.textContent = 'Escolha um arquivo de imagem (JPG, PNG ou WebP).'; err.hidden = false; return; }
+  try { foto = await Produtos.resizeImage(file); showPhoto(); }
+  catch (e) { err.textContent = 'Não foi possível abrir essa imagem. Tente outro arquivo.'; err.hidden = false; }
+}
+
+function openSheet(p) {
+  current = structuredClone(p);
+  foto = p.foto || null;
+  $('f-sku').value = p.sku || '';
+  $('f-nome').value = p.nome || '';
+  $('f-desc').value = p.descricao || '';
+  $('form-err').hidden = true;
+  $('photo-err').hidden = true;
+  const fl = $('fil-list');
+  fl.replaceChildren(...(p.filamentos?.length ? p.filamentos : [{}]).map(filRow));
+  const r = p.resultado;
+  $('costs').innerHTML = r ? `
+    <div><span>Custo de produção</span><b>${money(r.prod)}</b></div>
+    <div><span>Custo total</span><b>${money(r.custo)}</b></div>
+    <div class="hl"><span>Preço sugerido</span><b>${money(r.preco)}</b></div>
+    <div><span>Preço mínimo</span><b>${money(r.minimo)}</b></div>
+    <div><span>Lucro (margem ${String(r.margem).replace('.', ',')}%)</span><b>${money(r.lucro)}</b></div>
+    <div><span>Venda e marketing</span><b>${money(r.venda)}</b></div>
+    <div class="full"><span>Impressão</span><b>${tempo(r.horas)} · ${String(r.peso).replace('.', ',')} g · ${r.pecas} ${r.pecas > 1 ? 'peças' : 'peça'} por mesa</b></div>`
+    : '<div class="full"><span>Sem cálculo salvo</span><b>—</b></div>';
+  $('calc-date').textContent = p.atualizadoEm ? 'atualizado em ' + new Date(p.atualizadoEm).toLocaleDateString('pt-BR') : '';
+  $('recalc').href = './?id=' + encodeURIComponent(p.id);
+  const del = $('delete');
+  del.textContent = 'Excluir';
+  del.classList.remove('confirm');
+  showPhoto();
+  filTotal();
+  history.replaceState(null, '', '?id=' + encodeURIComponent(p.id));
+  $('sheet').showModal();
+}
+function closeSheet() {
+  $('sheet').close();
+}
+$('sheet').addEventListener('close', () => { current = null; history.replaceState(null, '', location.pathname); });
+
+$('form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const sku = $('f-sku').value.trim();
+  const nome = $('f-nome').value.trim();
+  const err = $('form-err');
+  const dup = list.find(p => p.id !== current.id && (p.sku || '').toLowerCase() === sku.toLowerCase());
+  err.hidden = false;
+  if (!sku || !nome) { err.textContent = 'Preencha o SKU e o nome da peça.'; return; }
+  if (dup) { err.textContent = `O SKU ${sku} já é usado por "${dup.nome}". Use outro código.`; return; }
+  err.hidden = true;
+  const p = { ...current, sku, nome, descricao: $('f-desc').value.trim(), filamentos: readFil().filter(f => f.gramas || f.cor), foto,
+    atualizadoEm: new Date().toISOString() };
+  if (p.inputs) p.inputs.nome = nome;
+  try {
+    await Produtos.put(p);
+    closeSheet();
+    await load();
+    toast(`${sku} salvo`);
+  } catch (e) {
+    err.textContent = 'Não foi possível salvar. O navegador pode estar sem espaço ou bloqueando dados do site.';
+    err.hidden = false;
+  }
+});
+
+$('delete').addEventListener('click', async () => {
+  const del = $('delete');
+  if (!del.classList.contains('confirm')) { del.classList.add('confirm'); del.textContent = 'Confirmar exclusão'; return; }
+  const sku = current.sku;
+  await Produtos.del(current.id);
+  closeSheet();
+  await load();
+  toast(`${sku} excluído`);
+});
+
+$('cards').addEventListener('click', e => {
+  const card = e.target.closest('.card');
+  const p = card && list.find(x => x.id === card.dataset.id);
+  if (p) openSheet(p);
+});
+$('q').addEventListener('input', render);
+$('close').addEventListener('click', closeSheet);
+$('cancel').addEventListener('click', closeSheet);
+$('sheet').addEventListener('click', e => { if (e.target === $('sheet')) closeSheet(); });
+$('fil-add').addEventListener('click', () => { $('fil-list').append(filRow()); filTotal(); });
+$('fil-list').addEventListener('input', filTotal);
+
+const drop = $('drop');
+drop.addEventListener('click', () => $('photo-file').click());
+drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('photo-file').click(); } });
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); setPhoto(e.dataTransfer.files[0]); });
+$('sheet').addEventListener('paste', e => {
+  const file = [...(e.clipboardData?.files || [])].find(f => f.type.startsWith('image/'));
+  if (file) { e.preventDefault(); setPhoto(file); }
+});
+$('photo-file').addEventListener('change', e => { setPhoto(e.target.files[0]); e.target.value = ''; });
+$('photo-change').addEventListener('click', () => $('photo-file').click());
+$('photo-remove').addEventListener('click', () => { foto = null; showPhoto(); });
+
+// Backup
+$('export-btn').addEventListener('click', () => {
+  const data = JSON.stringify({ app: 'calculadora-custo-3d', versao: 1, exportadoEm: new Date().toISOString(), produtos: list }, null, 2);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+  a.download = `produtos-3d-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+$('import-btn').addEventListener('click', () => $('import-file').click());
+$('import-file').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const items = (Array.isArray(data) ? data : data.produtos || []).filter(p => p && p.id && p.sku);
+    if (!items.length) throw new Error('vazio');
+    for (const p of items) await Produtos.put(p);
+    await load();
+    toast(`${items.length} ${items.length === 1 ? 'produto importado' : 'produtos importados'}`);
+  } catch (err) {
+    toast('Esse arquivo não é um backup de produtos válido.');
+  }
+});
+
+load().then(() => {
+  const id = new URLSearchParams(location.search).get('id');
+  const p = id && list.find(x => x.id === id);
+  if (p) openSheet(p);
+}).catch(() => toast('Não foi possível abrir os produtos salvos neste navegador.'));
+</script>
+</body>
+</html>
